@@ -20,7 +20,8 @@
 
 			// Event Callbacks
 			open: jQuery.noop,
-			message: jQuery.noop
+			message: jQuery.noop,
+			events: {}
 		},
 		setup: {
 			stream: {},
@@ -80,37 +81,40 @@
 			// Open a host api event source
 			openEventSource: function( options ) {
 				var label = options.label;
+				var cbs = options.events;
+				var eventname;
+				
+				cbs.message = stream.cache[ label ].options.message;
+				
+				if (stream.cache[ label ].stream.addEventListener) {
+					stream.cache[ label ].stream.addEventListener("open", function(event) {
+						if ( stream.cache[ label ] ) {
 
-				stream.cache[ label ].stream.addEventListener("open", function(event) {
-					if ( stream.cache[ label ] ) {
+							this.label = label;
 
-						this.label = label;
+							stream.cache[ label ].options.open.call(this, event);
+						}
+					}, false);
 
-						stream.cache[ label ].options.open.call(this, event);
+					for (var k in cbs) {
+						if (cbs.hasOwnProperty(k)) {
+							stream.cache[label].stream.addEventListener(k, function(event) {
+								if ( stream.cache[ label ] ) {
+									this.label = label;
+
+									stream.cache[ label ].lastEventId = +event.lastEventId;							
+//									stream.cache[ label ].history[stream.cache[ label ].lastEventId] = streamData;
+									if (stream.cache[ label ].options.events[event.type]) {
+										stream.cache[ label ].options.events[event.type].call(this, event, stream.cache[ label ]);
+									} else {
+										stream.cache[ label ].options.message.call(this, event, stream.cache[ label ]);
+									}
+								}
+							}, false);
+
+						}
 					}
-				}, false);
-
-				stream.cache[label].stream.addEventListener("message", function(event) {
-
-					var streamData = [];
-
-					if ( stream.cache[ label ] ) {
-
-						streamData[ streamData.length ] = jQuery.parseJSON( event.data );
-
-						this.label = label;
-
-						stream.cache[ label ].lastEventId = +event.lastEventId;
-						stream.cache[ label ].history[stream.cache[ label ].lastEventId] = streamData;
-						stream.cache[ label ].options.message.call(this, streamData[0] ? streamData[0] : null, {
-							data: streamData,
-							lastEventId: stream.cache[ label ].lastEventId
-						}, event);
-
-						// TODO: Add custom event triggering
-					}
-				}, false);
-
+				}
 				return stream.cache[ label ].stream;
 			},
 			// open fallback event source
@@ -131,64 +135,84 @@
 							}
 						},
 						success: function( data ) {
-
+//console.log(data);
 							var tempdata,
 								label = options.label,
 								parsedData = [],
+								stanza = [],
 								streamData = jQuery.map( data.split("\n\n"), function(sdata, i) {
 									return !!sdata && sdata;
 								}),
 								idx = 0, length = streamData.length,
 								rretryprefix = /retry/,
 								retries;
-
+// this system won't work for partial stanzas - jb
 							if ( jQuery.isArray( streamData ) ) {
-
+//console.log(streamData);
 								for ( ; idx < length; idx++ ) {
-
+									tempdata = '';
+									
 									if ( streamData[ idx ] ) {
+										stanza  = jQuery.map( streamData[ idx ].split("\n"), function(sdata, i) {
+											return !!sdata && sdata;
+										});
+//console.log(stanza);									
+										
+										var tempevent = {};
+										
+										jQuery.each(stanza, function (i, line) {
+											if (line.charAt(0) != ':') {
+												lineparts = line.match(/^(\w+):\s+(.*)/);
+												lineparts.shift();
+//console.log(lineparts);
+												switch (lineparts[0]) {
+												case "data":
+													tempevent.data += lineparts[1] + "\n";
+													break;
+													
+												case "id":
+													tempevent.lastEventId = parseInt(lineparts[1]);
+													break;
+													
+												case "event":
+													tempevent.type = lineparts[1]
+													break;
+													
+												case "retry":
+													stream.cache[ label ].retry = parseInt(lineparts[1]);
+//console.log(lineparts[0]);
+												}
+											}
+										});
+																				
+										if ( stream.cache[ label ] ) {
 
-										if ( rretryprefix.test( streamData[ idx ] ) &&
-													(retries = streamData[ idx ].split("retry: ")).length ) {
+											this.label = label;
 
-											if ( retries.length === 2 && !retries[ 0 ] ) {
-
-												stream.cache[ label ].retry = stream.cache[ label ].options.retry = +retries[ 1 ];
+											stream.cache[ label ].lastEventId = tempevent.lastEventId;							
+//											stream.cache[ label ].history[stream.cache[ label ].lastEventId] = streamData;
+//console.log(tempevent);											
+											if (stream.cache[ label ].options.events[tempevent.type]) {
+												stream.cache[ label ].options.events[tempevent.type].call(this, tempevent, stream.cache[ label ]);
+											} else {
+												stream.cache[ label ].options.message.call(this, tempevent, stream.cache[ label ]);
 											}
 
-										} else {
-											tempdata = streamData[ idx ].split("data: ")[ 1 ];
-
-											// Convert `dataType` here
-											if ( options.dataType === "json" ) {
-												tempdata = jQuery.parseJSON( tempdata );
-											}
-
-											parsedData[ parsedData.length ] = tempdata;
+											setTimeout(
+												function() {
+													pluginFns._private.openPollingSource.call( this, options );
+												},
+												// Use server sent retry time if exists or default retry time if not
+												( stream.cache[ label ] && stream.cache[ label ].retry ) || 500
+											);
 										}
+
+
 									}
 								}
+//console.log(parsedData);								
 							}
 
-							if ( stream.cache[ label ] ) {
-
-								this.label = label;
-
-								stream.cache[ label ].lastEventId++;
-								stream.cache[ label ].history[ stream.cache[ label ].lastEventId ] = parsedData;
-								stream.cache[ label ].options.message.call(this, parsedData[0] ? parsedData[0] : null, {
-									data: parsedData,
-									lastEventId: stream.cache[ label ].lastEventId
-								});
-
-								setTimeout(
-									function() {
-										pluginFns._private.openPollingSource.call( this, options );
-									},
-									// Use server sent retry time if exists or default retry time if not
-									( stream.cache[ label ] && stream.cache[ label ].retry ) || 500
-								);
-							}
 						},
 						cache: false,
 						timeout: 50000
@@ -243,10 +267,12 @@
 		// Determine and declare `event stream` source,
 		// whether will be host api or XHR fallback
 		streamType = !isHostApi ?
-								// If not host api, open a polling fallback
+//								 If not host api, open a polling fallback
 								pluginFns._private.openPollingSource(opts) :
 								new EventSource(opts.url + ( opts.data ? "?" + opts.data : "" ) );
 
+//		streamType = pluginFns._private.openPollingSource(opts);
+		
 		// Add to event sources
 		stream.cache[ opts.label ] = jQuery.extend({}, stream.setup, {
 			stream: streamType,
